@@ -1,0 +1,25 @@
+version: 1
+frontend:
+  phases:
+    preBuild:
+      commands:
+        # Next.js 15 necesita Node 18.18 o superior; se fija Node 20
+        - nvm install 20
+        - nvm use 20
+        - node -v
+        - npm ci
+    build:
+      commands:
+        # En Amplify, las variables de la consola solo existen durante el build. Para que el
+        # servidor de Next.js (SSR, Server Actions y middleware) pueda leerlas en tiempo de
+        # ejecución, se copian a .env.production antes de compilar.
+        - env | grep -E '^(DB_|DATA_STORE|ADMIN_|SESSION_SECRET|NEXT_PUBLIC_)' >> .env.production || true
+        - npm run build
+  artifacts:
+    baseDirectory: .next
+    files:
+      - '**/*'
+  cache:
+    paths:
+      - .next/cache/**/*
+      - node_modules/**/*
