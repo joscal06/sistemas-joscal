@@ -8,6 +8,7 @@ import {
   QueryCommand,
   UpdateCommand,
 } from "@aws-sdk/lib-dynamodb";
+import { Redis } from "@upstash/redis";
 import type { EntityMap, EntityName } from "./types";
 import { datosDeEjemplo } from "./seed";
 
@@ -16,10 +17,11 @@ import { datosDeEjemplo } from "./seed";
  *
  * - "dynamodb": una sola tabla de Amazon DynamoDB con clave de partición `pk` (tipo de entidad)
  *   y clave de ordenamiento `sk` (id). Listar una entidad es un Query por `pk`.
+ * - "redis": Upstash Redis (base gratuita integrada con Vercel); ver RedisStore.
  * - "memory": datos en memoria con datos de ejemplo; solo para desarrollo local o demostración.
  */
 export interface Store {
-  readonly kind: "dynamodb" | "memory";
+  readonly kind: "dynamodb" | "redis" | "memory";
   list<E extends EntityName>(entity: E): Promise<EntityMap[E][]>;
   get<E extends EntityName>(entity: E, id: string): Promise<EntityMap[E] | null>;
   put<E extends EntityName>(entity: E, item: EntityMap[E]): Promise<void>;
@@ -138,6 +140,67 @@ class DynamoStore implements Store {
   }
 }
 
+/**
+ * Redis (Upstash, integrado con Vercel): un hash por entidad (`sj:<entidad>`, campo = id, valor = JSON)
+ * y un hash `sj:contador` para los correlativos (HINCRBY es atómico). La primera vez que se usa una base
+ * vacía carga los datos de ejemplo, una sola vez, protegida con `SET NX`.
+ */
+class RedisStore implements Store {
+  readonly kind = "redis" as const;
+  private redis: Redis;
+  private listo: Promise<void> | null = null;
+
+  constructor(url: string, token: string) {
+    this.redis = new Redis({ url, token });
+  }
+
+  private key(entity: string) {
+    return `sj:${entity}`;
+  }
+
+  private preparar() {
+    this.listo ??= (async () => {
+      const primero = await this.redis.set("sj:sembrado", new Date().toISOString(), { nx: true });
+      if (primero !== "OK") return;
+      const seed = datosDeEjemplo();
+      const p = this.redis.pipeline();
+      for (const [entity, rows] of Object.entries(seed.entidades)) {
+        if (!rows.length) continue;
+        p.hset(this.key(entity), Object.fromEntries((rows as unknown as Row[]).map((r) => [r.id, r])));
+      }
+      p.hset("sj:contador", seed.contadores);
+      await p.exec();
+    })().catch((e) => {
+      this.listo = null;
+      throw e;
+    });
+    return this.listo;
+  }
+
+  async list<E extends EntityName>(entity: E) {
+    await this.preparar();
+    const all = await this.redis.hgetall<Record<string, Row>>(this.key(entity));
+    return Object.values(all ?? {}) as unknown as EntityMap[E][];
+  }
+  async get<E extends EntityName>(entity: E, id: string) {
+    await this.preparar();
+    const r = await this.redis.hget<Row>(this.key(entity), id);
+    return (r ?? null) as unknown as EntityMap[E] | null;
+  }
+  async put<E extends EntityName>(entity: E, item: EntityMap[E]) {
+    await this.preparar();
+    await this.redis.hset(this.key(entity), { [item.id]: item });
+  }
+  async remove(entity: EntityName, id: string) {
+    await this.preparar();
+    await this.redis.hdel(this.key(entity), id);
+  }
+  async next(counter: string) {
+    await this.preparar();
+    return this.redis.hincrby("sj:contador", counter, 1);
+  }
+}
+
 function strip(item: Record<string, unknown>) {
   const { pk: _pk, sk: _sk, ...rest } = item;
   void _pk;
@@ -149,10 +212,16 @@ const g = globalThis as unknown as { __sjStore?: Store };
 
 export function getStore(): Store {
   if (g.__sjStore) return g.__sjStore;
-  const table = process.env.DB_TABLE;
   const forced = process.env.DATA_STORE;
-  g.__sjStore =
-    forced === "memory" || !table ? new MemoryStore() : new DynamoStore(table);
+  const table = process.env.DB_TABLE;
+  // Vercel (Upstash Redis del Marketplace) define KV_REST_API_*; Upstash directo usa UPSTASH_REDIS_REST_*.
+  const redisUrl = process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL;
+  const redisToken = process.env.KV_REST_API_TOKEN || process.env.UPSTASH_REDIS_REST_TOKEN;
+
+  if (forced === "memory") g.__sjStore = new MemoryStore();
+  else if (table && forced !== "redis") g.__sjStore = new DynamoStore(table);
+  else if (redisUrl && redisToken) g.__sjStore = new RedisStore(redisUrl, redisToken);
+  else g.__sjStore = new MemoryStore();
   return g.__sjStore;
 }
 

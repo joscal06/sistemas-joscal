@@ -55,8 +55,8 @@ export default async function PanelLayout({ children }: { children: React.ReactN
       <div className="min-w-0">
         {store.kind === "memory" && (
           <p className="no-print border-b border-amber/40 bg-amber/15 px-4 py-2 text-center text-xs text-amber-900">
-            Modo demostración: los datos están en memoria y se reinician. Configura <code>DB_TABLE</code> para usar
-            DynamoDB.
+            Modo demostración: los datos están en memoria y se reinician. Conecta Upstash Redis (Vercel) o
+            configura <code>DB_TABLE</code> para usar DynamoDB.
           </p>
         )}
         {errorBD && (
